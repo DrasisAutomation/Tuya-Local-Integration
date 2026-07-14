@@ -24,6 +24,9 @@ from .const import (
 
 _LOGGER = logging.getLogger(__name__)
 
+# Force Home Assistant to poll the switch states every 5 seconds instead of the default 30 seconds
+SCAN_INTERVAL = timedelta(seconds=5)
+
 async def async_setup_entry(
     hass: HomeAssistant,
     config_entry: ConfigEntry,
@@ -39,9 +42,13 @@ async def async_setup_entry(
     channels = config[CONF_CHANNELS]
     name = config_entry.title
 
-    # Initialize tinytuya OutletDevice
+    # Initialize tinytuya OutletDevice with safe version parsing fallback
     dev = tinytuya.OutletDevice(device_id, ip, local_key)
-    dev.set_version(float(version))
+    try:
+        float_version = float(version)
+    except ValueError:
+        float_version = 3.5
+    dev.set_version(float_version)
 
     async def async_update_data():
         """Fetch status from Tuya device using executor thread."""
@@ -71,8 +78,14 @@ async def async_setup_entry(
         update_interval=timedelta(seconds=5),
     )
 
-    # Fetch initial data so entities start with active state and don't show as unavailable
-    await coordinator.async_config_entry_first_refresh()
+    # Initialize with empty data so entities can load even if the device is momentarily offline during boot
+    coordinator.data = {}
+
+    # Attempt first update but catch errors gracefully so integration setup always succeeds
+    try:
+        await coordinator.async_refresh()
+    except Exception as err:
+        _LOGGER.warning("Initial update failed for local Tuya device %s (will retry): %s", device_id, err)
 
     entities = []
     for channel in range(1, channels + 1):
@@ -120,7 +133,8 @@ class TuyaLocalOfflineSwitch(CoordinatorEntity, SwitchEntity):
     @property
     def available(self) -> bool:
         """Return true if device is connected and available."""
-        return self.coordinator.last_update_success
+        # The device is available if the last poll was successful and coordinator has populated data
+        return self.coordinator.last_update_success and bool(self.coordinator.data)
 
     async def async_turn_on(self, **kwargs) -> None:
         """Turn the switch on."""
