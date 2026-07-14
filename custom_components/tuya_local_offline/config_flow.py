@@ -46,6 +46,6 @@ class TuyaLocalOfflineConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             vol.Required(CONF_CHANNELS, default="1"): vol.In(["1", "2", "3", "4"]),
         })
 
-        return self.show_form(
+        return self.async_show_form(
             step_id="user", data_schema=data_schema, errors=errors
         )
