@@ -1,7 +1,5 @@
 """Support for Tuya Local Offline Switch platform."""
 import logging
-import time
-import threading
 from datetime import timedelta
 import tinytuya
 
@@ -9,6 +7,11 @@ from homeassistant.components.switch import SwitchEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.update_coordinator import (
+    CoordinatorEntity,
+    DataUpdateCoordinator,
+    UpdateFailed,
+)
 
 from .const import (
     DOMAIN,
@@ -20,9 +23,6 @@ from .const import (
 )
 
 _LOGGER = logging.getLogger(__name__)
-
-# Force Home Assistant to poll the switch states every 5 seconds instead of the default 30 seconds
-SCAN_INTERVAL = timedelta(seconds=5)
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -43,90 +43,61 @@ async def async_setup_entry(
     dev = tinytuya.OutletDevice(device_id, ip, local_key)
     dev.set_version(float(version))
 
-    # Thread lock to prevent concurrent socket connection collisions on the same device
-    device_lock = threading.Lock()
+    async def async_update_data():
+        """Fetch status from Tuya device using executor thread."""
+        try:
+            status = await hass.async_add_executor_job(dev.status)
+            if isinstance(status, dict) and "dps" in status:
+                # Merge and normalize keys (both string and integer representation)
+                normalized_dps = {}
+                for k, v in status["dps"].items():
+                    normalized_dps[k] = v
+                    normalized_dps[str(k)] = v
+                    try:
+                        normalized_dps[int(k)] = v
+                    except ValueError:
+                        pass
+                return normalized_dps
+            raise UpdateFailed("Invalid status format returned from Tuya device")
+        except Exception as err:
+            raise UpdateFailed(f"Error communicating with local Tuya device: {err}")
 
-    # Shared state cache between channels to avoid redundant network polling
-    state_cache = {"dps": {}, "connected": False, "last_updated": 0}
+    # Use Home Assistant's official DataUpdateCoordinator to poll once every 5 seconds
+    coordinator = DataUpdateCoordinator(
+        hass,
+        _LOGGER,
+        name=name,
+        update_method=async_update_data,
+        update_interval=timedelta(seconds=5),
+    )
 
-    # Poll device status safely in executor thread with rate limiting and socket lock
-    def poll_device():
-        now = time.time()
-        # Rate limit polls to once every 3 seconds to align with the 5s SCAN_INTERVAL
-        if now - state_cache["last_updated"] < 3:
-            return True
-            
-        with device_lock:
-            try:
-                status = dev.status()
-                if isinstance(status, dict) and "dps" in status:
-                    # Merge and normalize keys (as both string and integer) into cache
-                    # This prevents partial DPS responses from overwriting/deleting other channel values
-                    for k, v in status["dps"].items():
-                        state_cache["dps"][k] = v
-                        state_cache["dps"][str(k)] = v
-                        try:
-                            state_cache["dps"][int(k)] = v
-                        except ValueError:
-                            pass
-                    state_cache["connected"] = True
-                    state_cache["last_updated"] = now
-                    return True
-            except Exception as err:
-                _LOGGER.debug("Error polling Tuya device %s: %s", device_id, err)
-        
-        # Mark offline only if connection has been failing for a while (15s)
-        if now - state_cache["last_updated"] > 15:
-            state_cache["connected"] = False
-        return False
+    # Fetch initial data so entities start with active state and don't show as unavailable
+    await coordinator.async_config_entry_first_refresh()
 
     entities = []
     for channel in range(1, channels + 1):
         entities.append(
             TuyaLocalOfflineSwitch(
+                coordinator,
                 dev,
-                device_id,
-                local_key,
-                ip,
-                name,
                 channel,
-                state_cache,
-                poll_device,
-                device_lock,
-                hass,
+                name,
+                device_id,
             )
         )
 
-    async_add_entities(entities, update_before_add=True)
+    async_add_entities(entities)
 
 
-class TuyaLocalOfflineSwitch(SwitchEntity):
+class TuyaLocalOfflineSwitch(CoordinatorEntity, SwitchEntity):
     """Representation of a Tuya Local Offline Switch Channel."""
 
-    def __init__(
-        self,
-        device,
-        device_id,
-        local_key,
-        ip,
-        device_name,
-        channel,
-        state_cache,
-        poll_fn,
-        device_lock,
-        hass,
-    ):
+    def __init__(self, coordinator, device, channel, device_name, device_id):
         """Initialize the switch."""
+        super().__init__(coordinator)
         self._device = device
-        self._device_id = device_id
-        self._local_key = local_key
-        self._ip = ip
-        self._device_name = device_name
         self._channel = channel
-        self._state_cache = state_cache
-        self._poll_fn = poll_fn
-        self._device_lock = device_lock
-        self._hass = hass
+        self._device_id = device_id
 
         self._attr_name = f"{device_name} Switch {channel}"
         self._attr_unique_id = f"tuya_local_offline_{device_id}_{channel}"
@@ -140,46 +111,44 @@ class TuyaLocalOfflineSwitch(SwitchEntity):
     @property
     def is_on(self) -> bool:
         """Return true if switch is on."""
-        dps = self._state_cache["dps"]
+        dps = self.coordinator.data
+        if dps is None:
+            return False
         # Safe check for both integer and string representation of the DPS channel key
         return dps.get(self._channel, dps.get(str(self._channel), False))
 
     @property
     def available(self) -> bool:
         """Return true if device is connected and available."""
-        return self._state_cache["connected"]
+        return self.coordinator.last_update_success
 
     async def async_turn_on(self, **kwargs) -> None:
         """Turn the switch on."""
         def set_on():
-            with self._device_lock:
-                try:
-                    # Prefer generic set_value which works directly on any DPS key type
-                    self._device.set_value(self._channel, True)
-                except Exception:
-                    self._device.set_status(True, self._channel)
+            try:
+                # Prefer generic set_value which works directly on any DPS key type
+                self._device.set_value(self._channel, True)
+            except Exception:
+                self._device.set_status(True, self._channel)
         
-        await self._hass.async_add_executor_job(set_on)
-        # Update both integer and string keys in cache for instant UI state feedback
-        self._state_cache["dps"][self._channel] = True
-        self._state_cache["dps"][str(self._channel)] = True
+        await self.hass.async_add_executor_job(set_on)
+        # Update cache data for instant state feedback in Home Assistant UI
+        if self.coordinator.data is not None:
+            self.coordinator.data[self._channel] = True
+            self.coordinator.data[str(self._channel)] = True
         self.async_write_ha_state()
 
     async def async_turn_off(self, **kwargs) -> None:
         """Turn the switch off."""
         def set_off():
-            with self._device_lock:
-                try:
-                    self._device.set_value(self._channel, False)
-                except Exception:
-                    self._device.set_status(False, self._channel)
+            try:
+                self._device.set_value(self._channel, False)
+            except Exception:
+                self._device.set_status(False, self._channel)
             
-        await self._hass.async_add_executor_job(set_off)
-        # Update both integer and string keys in cache for instant UI state feedback
-        self._state_cache["dps"][self._channel] = False
-        self._state_cache["dps"][str(self._channel)] = False
+        await self.hass.async_add_executor_job(set_off)
+        # Update cache data for instant state feedback in Home Assistant UI
+        if self.coordinator.data is not None:
+            self.coordinator.data[self._channel] = False
+            self.coordinator.data[str(self._channel)] = False
         self.async_write_ha_state()
-
-    async def async_update(self) -> None:
-        """Update the entity state."""
-        await self._hass.async_add_executor_job(self._poll_fn)
