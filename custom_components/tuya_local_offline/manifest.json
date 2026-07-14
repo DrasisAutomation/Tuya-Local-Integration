@@ -1,0 +1,10 @@
+{
+  "domain": "tuya_local_offline",
+  "name": "Tuya Local Offline",
+  "codeowners": ["@drasisautomation"],
+  "config_flow": true,
+  "documentation": "https://github.com/DrasisAutomation/Tuya-Local-Addon",
+  "iot_class": "local_polling",
+  "requirements": ["tinytuya==1.14.0"],
+  "version": "1.0.0"
+}

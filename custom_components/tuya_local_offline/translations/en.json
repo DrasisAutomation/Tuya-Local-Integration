@@ -1,0 +1,18 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Configure Tuya Local Offline Device",
+        "description": "Enter the credentials for your local offline Tuya Switch relay.",
+        "data": {
+          "name": "Device Name",
+          "device_id": "Device ID",
+          "local_key": "Local Key",
+          "ip": "IP Address",
+          "version": "Protocol Version",
+          "channels": "Number of Channels (Relays)"
+        }
+      }
+    }
+  }
+}
