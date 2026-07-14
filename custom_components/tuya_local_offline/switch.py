@@ -42,13 +42,19 @@ async def async_setup_entry(
     channels = config[CONF_CHANNELS]
     name = config_entry.title
 
-    # Initialize tinytuya OutletDevice with safe version parsing fallback
+    # Initialize tinytuya OutletDevice
     dev = tinytuya.OutletDevice(device_id, ip, local_key)
     try:
         float_version = float(version)
     except ValueError:
         float_version = 3.5
     dev.set_version(float_version)
+    
+    # Configure tinytuya to keep a persistent TCP socket open.
+    # This prevents the overhead of opening/closing sockets on every single command or poll,
+    # which overloads the Tuya micro-controller and causes connection refused/unavailable status drops.
+    dev.set_socketPersistent(True)
+    dev.set_socketTimeout(3) # Short timeout to fail-fast if device drops off network
 
     async def async_update_data():
         """Fetch status from Tuya device using executor thread."""
@@ -133,8 +139,8 @@ class TuyaLocalOfflineSwitch(CoordinatorEntity, SwitchEntity):
     @property
     def available(self) -> bool:
         """Return true if device is connected and available."""
-        # The device is available if the last poll was successful and coordinator has populated data
-        return self.coordinator.last_update_success and bool(self.coordinator.data)
+        # Simple and standard HA availability check based on last poll success
+        return self.coordinator.last_update_success
 
     async def async_turn_on(self, **kwargs) -> None:
         """Turn the switch on."""
