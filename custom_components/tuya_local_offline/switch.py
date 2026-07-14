@@ -2,6 +2,7 @@
 import logging
 import time
 import threading
+from datetime import timedelta
 import tinytuya
 
 from homeassistant.components.switch import SwitchEntity
@@ -19,6 +20,9 @@ from .const import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+# Force Home Assistant to poll the switch states every 5 seconds instead of the default 30 seconds
+SCAN_INTERVAL = timedelta(seconds=5)
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -48,14 +52,14 @@ async def async_setup_entry(
     # Poll device status safely in executor thread with rate limiting and socket lock
     def poll_device():
         now = time.time()
-        # Rate limit polls to once every 5 seconds
-        if now - state_cache["last_updated"] < 5:
+        # Rate limit polls to once every 3 seconds to align with the 5s SCAN_INTERVAL
+        if now - state_cache["last_updated"] < 3:
             return True
             
         with device_lock:
             try:
                 status = dev.status()
-                if status and "dps" in status:
+                if isinstance(status, dict) and "dps" in status:
                     state_cache["dps"] = status["dps"]
                     state_cache["connected"] = True
                     state_cache["last_updated"] = now
