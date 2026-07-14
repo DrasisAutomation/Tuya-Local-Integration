@@ -60,7 +60,15 @@ async def async_setup_entry(
             try:
                 status = dev.status()
                 if isinstance(status, dict) and "dps" in status:
-                    state_cache["dps"] = status["dps"]
+                    # Merge and normalize keys (as both string and integer) into cache
+                    # This prevents partial DPS responses from overwriting/deleting other channel values
+                    for k, v in status["dps"].items():
+                        state_cache["dps"][k] = v
+                        state_cache["dps"][str(k)] = v
+                        try:
+                            state_cache["dps"][int(k)] = v
+                        except ValueError:
+                            pass
                     state_cache["connected"] = True
                     state_cache["last_updated"] = now
                     return True
